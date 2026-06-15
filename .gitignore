@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# .NET / C#
+core/bin/
+core/obj/
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+credentials.json
+
+# Browser extension build artifacts
+extension/node_modules/
+extension/dist/
+
+# Docker
+infra/*.env
+
+# Logs
+*.log

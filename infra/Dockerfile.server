@@ -1,0 +1,27 @@
+FROM rust:1.96-slim AS builder
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock* ./
+COPY client/Cargo.toml client/Cargo.toml
+COPY server/Cargo.toml server/Cargo.toml
+
+RUN mkdir -p client/src server/src && \
+    echo "fn main() {}" > client/src/main.rs && \
+    echo "fn main() {}" > server/src/main.rs && \
+    cargo build --release -p clipx-server && \
+    rm -rf client/src server/src
+
+COPY client/src client/src
+COPY server/src server/src
+
+RUN touch server/src/main.rs && cargo build --release -p clipx-server
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/clipx-server /usr/local/bin/clipx-server
+
+EXPOSE 8080
+
+CMD ["clipx-server"]

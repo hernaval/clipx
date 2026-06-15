@@ -1,0 +1,36 @@
+[package]
+name = "clipx-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+directories = "6"
+tray-icon = "0.19"
+muda = "0.15"
+egui = "0.29"
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+global-hotkey = "0.6"
+winit = { version = "0.30", features = ["rwh_06"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+clipboard-win = "5"
+axum = { version = "0.8", features = ["ws"] }
+rand = "0.9"
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+crypto_box = { version = "0.9", features = ["chacha20"] }
+rand_core = { version = "0.6", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,53 @@
+# ClipX LAN sync — Windows firewall + network profile setup
+#
+# Run all commands in an ELEVATED PowerShell (Run as Administrator).
+# Apply on BOTH Machine A and Machine B.
+# Adjust $exe / -InterfaceAlias per machine before running.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ACTIVATE
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. Set network profile to Private (required for the rules below to apply).
+#    Machine A example (Ethernet):
+Set-NetConnectionProfile -InterfaceAlias "Ethernet" -NetworkCategory Private
+
+#    Machine B example (Wi-Fi):
+# Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private
+
+# 2. Allow ClipX inbound for LAN sync (TCP 41234) and mDNS (UDP 5353).
+#    Adjust the path to wherever clipx_client.exe lives on this machine.
+$exe = "D:\dev\side projects\clipX\target\debug\clipx-client.exe"
+
+New-NetFirewallRule -DisplayName "ClipX (TCP 41234)" `
+  -Direction Inbound -Program $exe `
+  -Protocol TCP -LocalPort 41234 -Action Allow -Profile Private
+
+New-NetFirewallRule -DisplayName "ClipX (mDNS UDP 5353)" `
+  -Direction Inbound -Program $exe `
+  -Protocol UDP -LocalPort 5353 -Action Allow -Profile Private
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VERIFY
+# ─────────────────────────────────────────────────────────────────────────────
+
+Get-NetConnectionProfile | Select-Object Name, InterfaceAlias, NetworkCategory
+Get-NetFirewallRule -DisplayName "ClipX*" | Select-Object DisplayName, Enabled, Profile, Action, Direction
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROLLBACK
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. Remove the firewall rules.
+Remove-NetFirewallRule -DisplayName "ClipX (TCP 41234)"
+Remove-NetFirewallRule -DisplayName "ClipX (mDNS UDP 5353)"
+
+# 2. Restore network profile to Public if desired.
+#    Machine A:
+Set-NetConnectionProfile -InterfaceAlias "Ethernet" -NetworkCategory Public
+
+#    Machine B:
+# Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Public
