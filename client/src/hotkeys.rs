@@ -10,9 +10,12 @@ pub enum HotkeyAction {
 }
 
 pub struct HotkeyManager {
+    #[allow(dead_code)]
     manager: GlobalHotKeyManager,
+    #[allow(dead_code)]
     overlay_hotkey_id: u32,
     hotkey_map: HashMap<u32, HotkeyAction>,
+    #[allow(dead_code)]
     registered_hotkeys: HashMap<u32, HotKey>,
 }
 
@@ -49,6 +52,7 @@ impl HotkeyManager {
         Ok(Self { manager, overlay_hotkey_id: overlay_id, hotkey_map, registered_hotkeys })
     }
 
+    #[allow(dead_code)]
     pub fn update_hotkey(&mut self, hotkey_str: &str) -> anyhow::Result<()> {
         if let Some(old_hk) = self.registered_hotkeys.remove(&self.overlay_hotkey_id) {
             let _ = self.manager.unregister(old_hk);
@@ -65,10 +69,12 @@ impl HotkeyManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn hotkey_id(&self) -> u32 {
         self.overlay_hotkey_id
     }
 
+    #[allow(dead_code)]
     pub fn resolve(&self, hotkey_id: u32) -> Option<&HotkeyAction> {
         self.hotkey_map.get(&hotkey_id)
     }

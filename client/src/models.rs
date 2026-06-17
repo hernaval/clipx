@@ -24,6 +24,8 @@ pub struct Clip {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub pin_slot: Option<u8>,
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 impl Clip {
@@ -91,6 +93,22 @@ pub struct WsMessage {
     pub payload: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Category {
+    pub name: String,
+    pub color: String,
+}
+
+fn default_categories() -> Vec<Category> {
+    vec![
+        Category { name: "Work".into(), color: "#4A90D9".into() },
+        Category { name: "Personal".into(), color: "#7ED321".into() },
+        Category { name: "Code".into(), color: "#F5A623".into() },
+        Category { name: "Links".into(), color: "#BD10E0".into() },
+        Category { name: "Passwords".into(), color: "#D0021B".into() },
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub server_url: String,
@@ -119,6 +137,8 @@ pub struct Settings {
     pub history_limit: u32,
     #[serde(default)]
     pub excluded_apps: Vec<String>,
+    #[serde(default = "default_categories")]
+    pub categories: Vec<Category>,
 }
 
 impl Default for Settings {
@@ -141,6 +161,7 @@ impl Default for Settings {
             auto_paste_inbound: true,
             history_limit: 50,
             excluded_apps: Vec::new(),
+            categories: default_categories(),
         }
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
+#[allow(dead_code)]
 pub struct OverlayState {
     pub visible: bool,
     pub clips: Vec<Clip>,
@@ -19,10 +20,12 @@ impl Default for OverlayState {
     }
 }
 
+#[allow(dead_code)]
 pub struct OverlayManager {
     state: Arc<RwLock<OverlayState>>,
 }
 
+#[allow(dead_code)]
 impl OverlayManager {
     pub fn new() -> Self {
         Self {
@@ -95,8 +98,6 @@ pub fn simulate_paste() {
     #[cfg(windows)]
     {
         use std::mem;
-        use std::thread;
-        use std::time::Duration;
 
         #[repr(C)]
         #[allow(non_snake_case)]

@@ -1,3 +1,4 @@
+mod backup;
 mod crypto;
 mod hotkeys;
 mod ipc;
@@ -240,6 +241,7 @@ fn main() -> anyhow::Result<()> {
                         e2e: s.e2e_enabled,
                         created_at: event.timestamp,
                         pin_slot: None,
+                        category: None,
                     };
                     drop(s);
 

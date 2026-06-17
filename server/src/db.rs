@@ -161,6 +161,7 @@ impl Database {
         Ok(user)
     }
 
+    #[allow(dead_code)]
     pub async fn get_user(&self, id: Uuid) -> anyhow::Result<Option<User>> {
         let row = sqlx::query_as::<_, (String, String, String)>(
             "SELECT id, email, created_at FROM users WHERE id = ?",
@@ -396,6 +397,7 @@ impl Database {
         }
     }
 
+    #[allow(dead_code)]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }

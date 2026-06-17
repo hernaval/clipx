@@ -3,16 +3,22 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 set PATH=%PATH%;C:\Users\herna\.cargo\bin
 cd /d "D:\dev\side projects\clipX"
 
+if not exist dist mkdir dist
+
 echo === Building Server ===
-cargo check -p clipx-server
+cargo build --release -p clipx-server
 if errorlevel 1 exit /b 1
+copy /y target\release\clipx-server.exe dist\ >nul
 
 echo === Building Client ===
-cargo check -p clipx-client
+cargo build --release -p clipx-client
 if errorlevel 1 exit /b 1
+copy /y target\release\clipx-client.exe dist\ >nul
 
 echo === Building Core ===
-dotnet build core\ClipX.Core.csproj
+dotnet build core\ClipX.Core.csproj -c Release
 if errorlevel 1 exit /b 1
 
 echo === All builds passed ===
+echo Output: dist\
+dir /b dist\*.exe

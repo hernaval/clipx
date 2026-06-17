@@ -1,7 +1,8 @@
-use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use tracing::info;
 
+#[allow(dead_code)]
 pub enum TrayAction {
     ShowHistory,
     ToggleSync,
@@ -9,6 +10,7 @@ pub enum TrayAction {
     Quit,
 }
 
+#[allow(dead_code)]
 pub struct TrayManager {
     _tray: TrayIcon,
     pub show_history_id: muda::MenuId,
@@ -17,6 +19,7 @@ pub struct TrayManager {
     pub quit_id: muda::MenuId,
 }
 
+#[allow(dead_code)]
 impl TrayManager {
     pub fn new() -> anyhow::Result<Self> {
         let menu = Menu::new();
@@ -72,6 +75,7 @@ impl TrayManager {
     }
 }
 
+#[allow(dead_code)]
 fn create_default_icon() -> Icon {
     let size = 32u32;
     let mut rgba = Vec::with_capacity((size * size * 4) as usize);

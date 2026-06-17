@@ -4,7 +4,6 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use crate::models::{Clip, ClipUpload, Device, InboundPairRequest, LanPairRequest, LanPairResponse, PeerDevice, RefreshRequest, RefreshResponse, Settings, WsMessage};
 use crate::state::{LogLevel, SharedStateHandle};
@@ -262,7 +261,7 @@ impl SyncEngine {
             if let Some(clip) = clip {
                 match self.upload_clip(clip).await {
                     Ok(()) => {}
-                    Err(e) => {
+                    Err(_e) => {
                         let new_attempts = entry.attempts + 1;
                         if new_attempts >= 10 {
                             warn!(clip_id = %entry.clip_id, "Max retries reached, marking failed");

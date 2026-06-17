@@ -50,6 +50,7 @@ pub struct AuditLog {
     pub timestamp: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub device_name: String,

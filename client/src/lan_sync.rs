@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::SinkExt;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::models::{Clip, Settings};

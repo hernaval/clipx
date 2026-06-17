@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use chrono::Local;
 use eframe::egui::{self, Color32, RichText, ScrollArea, ViewportCommand};
-use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
+use global_hotkey::GlobalHotKeyEvent;
 use tokio::sync::RwLock;
 use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tray_icon::menu::{Menu, MenuItem, MenuEvent, PredefinedMenuItem};
@@ -11,12 +11,26 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use crate::hotkeys::{HotkeyAction, HotkeyManager};
 use crate::models::{
-    BootstrapRequest, BootstrapResponse, ClipboardEvent, Device, InboundPairRequest,
+    BootstrapRequest, BootstrapResponse, Category, ClipboardEvent, Device, InboundPairRequest,
     LanPairRequest, LanPairResponse, PairConfirmRequest, PairConfirmResponse,
     PeerDevice, Settings,
 };
 use crate::state::{LogLevel, SharedStateHandle};
 use crate::storage::Storage;
+
+fn parse_hex_color(hex: &str) -> Color32 {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        ) {
+            return Color32::from_rgb(r, g, b);
+        }
+    }
+    Color32::GRAY
+}
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -108,6 +122,25 @@ pub struct ClipXApp {
     /// Restored on double-click-paste so Ctrl+V lands in the original app.
     /// Stored as isize because HWND is *const c_void (not Send).
     previous_foreground_hwnd: Option<isize>,
+
+    backup_password: String,
+    backup_status: Option<(String, bool)>,
+    backup_loading: bool,
+    backup_tx: std::sync::mpsc::SyncSender<Result<BackupMsg, String>>,
+    backup_rx: std::sync::mpsc::Receiver<Result<BackupMsg, String>>,
+
+    filter_category: Option<String>,
+    drag_source_clip_id: Option<Uuid>,
+    drag_source_slot: Option<u8>,
+    drag_preview_text: String,
+    drop_target_slot: Option<u8>,
+    new_category_name: String,
+    new_category_color: String,
+}
+
+enum BackupMsg {
+    ExportDone { clip_count: usize, file_size: u64 },
+    ImportDone { imported: usize, skipped: usize, total: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +198,7 @@ impl ClipXApp {
         let (device_tx, device_rx) = std::sync::mpsc::sync_channel(1);
         let (lan_pair_result_tx, lan_pair_result_rx) = std::sync::mpsc::sync_channel(1);
         let (pair_token_tx, pair_token_rx) = std::sync::mpsc::sync_channel(1);
+        let (backup_tx, backup_rx) = std::sync::mpsc::sync_channel(1);
 
         {
             let mut s = state.lock().unwrap();
@@ -220,6 +254,18 @@ impl ClipXApp {
             pair_token_modal: None,
             pair_token_loading: false,
             previous_foreground_hwnd: None,
+            backup_password: String::new(),
+            backup_status: None,
+            backup_loading: false,
+            backup_tx: backup_tx,
+            backup_rx: backup_rx,
+            filter_category: None,
+            drag_source_clip_id: None,
+            drag_source_slot: None,
+            drag_preview_text: String::new(),
+            drop_target_slot: None,
+            new_category_name: String::new(),
+            new_category_color: "#4A90D9".into(),
         }
     }
 
@@ -373,11 +419,10 @@ impl eframe::App for ClipXApp {
             self.has_jwt = s.jwt.is_some();
         }
 
-        // X button always hides; quit happens via tray (direct process::exit)
+        // X button quits the app
         ctx.input(|i| {
             if i.viewport().close_requested() {
-                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                std::process::exit(0);
             }
         });
 
@@ -488,6 +533,54 @@ impl eframe::App for ClipXApp {
                 Err(e) => {
                     self.state.lock().unwrap().log(LogLevel::Error, format!("LAN pairing failed: {e}"));
                     self.state.lock().unwrap().pending_pair_request = None;
+                }
+            }
+        }
+
+        // Poll backup result
+        if let Ok(result) = self.backup_rx.try_recv() {
+            self.backup_loading = false;
+            match result {
+                Ok(BackupMsg::ExportDone { clip_count, file_size }) => {
+                    let size_kb = file_size / 1024;
+                    self.backup_status = Some((
+                        format!("Exported {clip_count} clips ({size_kb} KB)"),
+                        false,
+                    ));
+                    self.state.lock().unwrap().log(
+                        LogLevel::Success,
+                        format!("Backup exported: {clip_count} clips, {size_kb} KB"),
+                    );
+                }
+                Ok(BackupMsg::ImportDone { imported, skipped, total }) => {
+                    self.backup_status = Some((
+                        format!("Imported {imported} clips ({skipped} duplicates skipped, {total} total)"),
+                        false,
+                    ));
+                    self.state.lock().unwrap().log(
+                        LogLevel::Success,
+                        format!("Backup imported: {imported} new, {skipped} skipped"),
+                    );
+                    let storage = self.storage.clone();
+                    let settings = self.settings.clone();
+                    let state = self.state.clone();
+                    self.handle.spawn(async move {
+                        let s = settings.read().await;
+                        let limit = s.history_limit as i64;
+                        let user_id = s.user_id;
+                        drop(s);
+                        if let Ok(clips) = storage.get_recent_clips(user_id, limit).await {
+                            let mut st = state.lock().unwrap();
+                            st.clips.clear();
+                            for c in clips {
+                                st.clips.push_back(c);
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    self.backup_status = Some((e.clone(), true));
+                    self.state.lock().unwrap().log(LogLevel::Error, format!("Backup error: {e}"));
                 }
             }
         }
@@ -936,6 +1029,27 @@ impl ClipXApp {
         });
         ui.separator();
 
+        // Category filter chips
+        let categories: Vec<Category> = self.settings.try_read()
+            .map(|s| s.categories.clone())
+            .unwrap_or_default();
+        if !categories.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                let all_selected = self.filter_category.is_none();
+                if ui.selectable_label(all_selected, "All").clicked() {
+                    self.filter_category = None;
+                }
+                for cat in &categories {
+                    let color = parse_hex_color(&cat.color);
+                    let selected = self.filter_category.as_deref() == Some(&cat.name);
+                    if ui.selectable_label(selected, RichText::new(&cat.name).color(color)).clicked() {
+                        self.filter_category = if selected { None } else { Some(cat.name.clone()) };
+                    }
+                }
+            });
+            ui.separator();
+        }
+
         if let Some((text, _)) = &self.copy_feedback {
             let preview = text.chars().take(40).collect::<String>();
             ui.label(RichText::new(format!("✓ Copied: {}…", preview)).color(Color32::GREEN));
@@ -954,6 +1068,9 @@ impl ClipXApp {
                 .filter(|c| c.content.to_lowercase().contains(&query))
                 .collect()
         };
+        if let Some(ref cat) = self.filter_category {
+            clips.retain(|c| c.category.as_deref() == Some(cat));
+        }
         clips.sort_by(|a, b| {
             b.is_pinned()
                 .cmp(&a.is_pinned())
@@ -963,28 +1080,55 @@ impl ClipXApp {
 
         if clips.is_empty() {
             ui.centered_and_justified(|ui| {
-                let msg = if self.search_query.is_empty() {
-                    "No clipboard history yet"
-                } else {
+                let msg = if !self.search_query.is_empty() {
                     "No clips match your search"
+                } else if self.filter_category.is_some() {
+                    "No clips in this category"
+                } else {
+                    "No clipboard history yet"
                 };
                 ui.label(RichText::new(msg).color(Color32::GRAY));
             });
             return;
         }
 
-        let mut to_delete: Option<uuid::Uuid> = None;
-        let mut to_set_slot: Option<(uuid::Uuid, Option<u8>)> = None;
+        let mut to_delete: Option<Uuid> = None;
+        let mut to_set_slot: Option<(Uuid, Option<u8>)> = None;
+        let mut to_set_category: Option<(Uuid, Option<String>)> = None;
 
         ScrollArea::vertical().show(ui, |ui| {
             for (i, clip) in clips.iter().enumerate() {
                 let preview = clip.content.chars().take(100).collect::<String>();
                 let preview = if clip.content.len() > 100 { format!("{}…", preview) } else { preview };
                 let time_str = clip.created_at.with_timezone(&Local).format("%H:%M:%S").to_string();
+                let is_pinned = clip.is_pinned();
+                let clip_id = clip.id;
 
                 ui.push_id(i, |ui| {
                     let frame_resp = egui::Frame::group(ui.style()).inner_margin(8.0).show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            // Drag handle for pinned clips
+                            if is_pinned {
+                                let drag_resp = ui.add(
+                                    egui::Label::new(
+                                        RichText::new("\u{2630}")
+                                            .color(Color32::from_rgb(150, 150, 150))
+                                    ).sense(egui::Sense::drag())
+                                );
+                                if drag_resp.drag_started() {
+                                    self.drag_source_clip_id = Some(clip_id);
+                                    self.drag_source_slot = clip.pin_slot;
+                                    let slot_label = clip.pin_slot.map(|s| format!("Ctrl+{s}  ")).unwrap_or_default();
+                                    let short: String = clip.content.chars().take(40).collect();
+                                    self.drag_preview_text = format!("{slot_label}{short}");
+                                }
+                                if drag_resp.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                } else if drag_resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                                }
+                            }
+
                             if let Some(slot) = clip.pin_slot {
                                 ui.label(
                                     RichText::new(format!("Ctrl+{slot}"))
@@ -993,55 +1137,105 @@ impl ClipXApp {
                                         .color(Color32::from_rgb(255, 200, 60))
                                 ).on_hover_text(format!("Quick Paste Slot {slot}"));
                             }
+                            if let Some(ref cat_name) = clip.category {
+                                if let Some(cat) = categories.iter().find(|c| c.name == *cat_name) {
+                                    let color = parse_hex_color(&cat.color);
+                                    ui.label(RichText::new(cat_name).small().strong().color(color));
+                                } else {
+                                    ui.label(RichText::new(cat_name).small().color(Color32::GRAY));
+                                }
+                            }
                             ui.label(RichText::new(&time_str).color(Color32::GRAY).small());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("✕").on_hover_text("Delete").clicked() {
-                                    to_delete = Some(clip.id);
-                                }
-                                let current_slot = clip.pin_slot;
-                                let clip_id = clip.id;
-                                egui::ComboBox::from_id_salt(format!("slot_{}", clip.id))
-                                    .selected_text(match current_slot {
-                                        Some(s) => format!("Slot {s}"),
-                                        None => "\u{2014}".into(),
-                                    })
-                                    .width(70.0)
-                                    .show_ui(ui, |ui| {
-                                        if ui.selectable_label(current_slot.is_none(), "None").clicked() && current_slot.is_some() {
-                                            to_set_slot = Some((clip_id, None));
-                                        }
-                                        for s in 1u8..=9 {
-                                            let occupied = clips.iter().any(|c| c.pin_slot == Some(s) && c.id != clip_id);
-                                            let label = if occupied {
-                                                format!("Slot {s} (replace)")
-                                            } else {
-                                                format!("Slot {s}")
-                                            };
-                                            if ui.selectable_label(current_slot == Some(s), label).clicked() && current_slot != Some(s) {
-                                                to_set_slot = Some((clip_id, Some(s)));
-                                            }
-                                        }
-                                    });
                                 ui.label(RichText::new(format!("{} chars", clip.content.len())).color(Color32::GRAY).small());
                             });
                         });
                         ui.label(&preview);
                     });
 
-                    // Double-click = Windows+V parity: copy + hide overlay + restore
-                    // previous foreground window + synthesize Ctrl+V.
+                    // Right-click context menu: Pin Slot → Category → Delete
+                    frame_resp.response.context_menu(|ui| {
+                        // ── Pin Slot ──
+                        ui.menu_button("Pin Slot", |ui| {
+                            if clip.pin_slot.is_some() {
+                                if ui.button("Unpin").clicked() {
+                                    to_set_slot = Some((clip_id, None));
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                            }
+                            for s in 1u8..=9 {
+                                let current = clip.pin_slot == Some(s);
+                                let occupied = clips.iter().any(|c| c.pin_slot == Some(s) && c.id != clip_id);
+                                let label = if current {
+                                    format!("Ctrl+{s} \u{2713}")
+                                } else if occupied {
+                                    format!("Ctrl+{s} (replace)")
+                                } else {
+                                    format!("Ctrl+{s}")
+                                };
+                                if ui.button(label).clicked() && !current {
+                                    to_set_slot = Some((clip_id, Some(s)));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+
+                        // ── Category ──
+                        ui.menu_button("Category", |ui| {
+                            if clip.category.is_some() {
+                                if ui.button("None").clicked() {
+                                    to_set_category = Some((clip_id, None));
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                            }
+                            for cat in &categories {
+                                let color = parse_hex_color(&cat.color);
+                                let current = clip.category.as_deref() == Some(&cat.name);
+                                let label = if current {
+                                    format!("{} \u{2713}", cat.name)
+                                } else {
+                                    cat.name.clone()
+                                };
+                                if ui.button(RichText::new(label).color(color)).clicked() && !current {
+                                    to_set_category = Some((clip_id, Some(cat.name.clone())));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+
+                        ui.separator();
+
+                        // ── Delete ──
+                        if ui.button(RichText::new("Delete").color(Color32::from_rgb(255, 80, 80))).clicked() {
+                            to_delete = Some(clip_id);
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Drop target highlight for pinned clips
+                    if is_pinned
+                        && self.drag_source_clip_id.is_some()
+                        && self.drag_source_clip_id != Some(clip_id)
+                        && frame_resp.response.hovered()
+                    {
+                        self.drop_target_slot = clip.pin_slot;
+                        ui.painter().rect_stroke(
+                            frame_resp.response.rect,
+                            4.0,
+                            egui::Stroke::new(2.0, Color32::from_rgb(100, 150, 255)),
+                        );
+                    }
+
                     if frame_resp.response.double_clicked() {
                         let content = clip.content.clone();
                         let target_hwnd = self.previous_foreground_hwnd.take();
                         self.handle.spawn(async move {
-                            // 1. Write to clipboard via the .NET bridge.
                             let _ = crate::ipc::IpcClient::send_rpc(
                                 "set_clipboard",
                                 Some(serde_json::json!({ "content": content })),
                             ).await;
-                            // 2. Restore the target window + simulate Ctrl+V.
-                            //    A tiny sleep gives Windows time to settle the
-                            //    foreground change before key events go out.
                             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
                             if let Some(h) = target_hwnd {
                                 restore_foreground(h);
@@ -1051,7 +1245,6 @@ impl ClipXApp {
                         });
                         ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
                     } else if frame_resp.response.clicked() {
-                        // Single click = copy only (no auto-paste).
                         let content = clip.content.clone();
                         self.handle.spawn(async move {
                             let _ = crate::ipc::IpcClient::send_rpc(
@@ -1069,6 +1262,59 @@ impl ClipXApp {
             }
         });
 
+        // Floating drag preview
+        if self.drag_source_clip_id.is_some() {
+            if let Some(pos) = ui.ctx().pointer_hover_pos() {
+                let layer_id = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag_preview"));
+                let painter = ui.ctx().layer_painter(layer_id);
+                let offset = egui::vec2(12.0, 8.0);
+                let text = egui::WidgetText::from(
+                    RichText::new(&self.drag_preview_text).small().strong()
+                );
+                let galley = text.into_galley(ui, Some(egui::TextWrapMode::Truncate), 250.0, egui::TextStyle::Small);
+                let text_size = galley.size();
+                let rect = egui::Rect::from_min_size(
+                    pos + offset,
+                    text_size + egui::vec2(16.0, 8.0),
+                );
+                painter.rect_filled(rect, 6.0, Color32::from_rgba_premultiplied(40, 40, 50, 220));
+                painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, Color32::from_rgb(100, 150, 255)));
+                painter.galley(rect.min + egui::vec2(8.0, 4.0), galley, Color32::WHITE);
+            }
+        }
+
+        // Handle drag-and-drop release for pinned clip reordering
+        if ui.input(|i| i.pointer.any_released()) {
+            if let (Some(src_id), Some(src_slot), Some(tgt_slot)) = (
+                self.drag_source_clip_id.take(),
+                self.drag_source_slot.take(),
+                self.drop_target_slot.take(),
+            ) {
+                if src_slot != tgt_slot {
+                    let mut s = self.state.lock().unwrap();
+                    let tgt_id = s.clips.iter().find(|c| c.pin_slot == Some(tgt_slot)).map(|c| c.id);
+                    s.assign_slot(src_id, Some(tgt_slot));
+                    if let Some(tid) = tgt_id {
+                        s.assign_slot(tid, Some(src_slot));
+                    }
+                    drop(s);
+
+                    let storage = self.storage.clone();
+                    self.handle.spawn(async move {
+                        let _ = storage.clear_pin_slot(tgt_slot).await;
+                        let _ = storage.set_pin_slot(src_id, Some(tgt_slot)).await;
+                        if let Some(tid) = tgt_id {
+                            let _ = storage.set_pin_slot(tid, Some(src_slot)).await;
+                        }
+                    });
+                }
+            }
+            self.drag_source_clip_id = None;
+            self.drag_source_slot = None;
+            self.drag_preview_text.clear();
+            self.drop_target_slot = None;
+        }
+
         if let Some((id, slot)) = to_set_slot {
             {
                 let mut s = self.state.lock().unwrap();
@@ -1080,6 +1326,16 @@ impl ClipXApp {
                     let _ = storage.clear_pin_slot(s).await;
                 }
                 let _ = storage.set_pin_slot(id, slot).await;
+            });
+        }
+
+        if let Some((id, cat)) = to_set_category {
+            if let Some(c) = self.state.lock().unwrap().clips.iter_mut().find(|c| c.id == id) {
+                c.category = cat.clone();
+            }
+            let storage = self.storage.clone();
+            self.handle.spawn(async move {
+                let _ = storage.set_category(id, cat.as_deref()).await;
             });
         }
 
@@ -1263,6 +1519,7 @@ impl ClipXApp {
         });
     }
 
+    #[allow(dead_code)]
     fn render_cloud_setup_form(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.form.mode, SetupMode::Pair, "Join with Token");
@@ -1894,6 +2151,100 @@ impl ClipXApp {
 
             ui.add_space(16.0);
 
+            // ── Categories ──────────────────────────────────────────────────
+            ui.label(RichText::new("Categories").strong().size(14.0));
+            ui.separator();
+            ui.add_space(4.0);
+
+            ui.label(
+                RichText::new("Organize clips with color-coded categories.")
+                    .color(Color32::GRAY)
+                    .small(),
+            );
+            ui.add_space(4.0);
+
+            let cats = snap.categories.clone();
+            for cat in &cats {
+                ui.horizontal(|ui| {
+                    let color = parse_hex_color(&cat.color);
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, color);
+                    ui.label(&cat.name);
+                    if ui.small_button("\u{2715}").on_hover_text("Remove").clicked() {
+                        let name = cat.name.clone();
+                        self.update_settings(move |s| {
+                            s.categories.retain(|c| c.name != name);
+                        });
+                    }
+                });
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_category_name)
+                        .desired_width(140.0)
+                        .hint_text("Category name\u{2026}"),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_category_color)
+                        .desired_width(80.0)
+                        .hint_text("#RRGGBB"),
+                );
+                let preview_color = parse_hex_color(&self.new_category_color);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, preview_color);
+
+                let can_add = !self.new_category_name.trim().is_empty();
+                if ui.add_enabled(can_add, egui::Button::new("Add")).clicked() && can_add {
+                    let name = self.new_category_name.trim().to_string();
+                    let color = self.new_category_color.clone();
+                    self.update_settings(move |s| {
+                        if !s.categories.iter().any(|c| c.name == name) {
+                            s.categories.push(Category { name, color });
+                        }
+                    });
+                    self.new_category_name.clear();
+                    self.new_category_color = "#4A90D9".into();
+                }
+            });
+
+            ui.add_space(16.0);
+
+            // ── Script Hooks (placeholder) ───────────────────────────────────
+            ui.label(RichText::new("Script Hooks").strong().size(14.0));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Coming Soon")
+                    .color(Color32::from_rgb(255, 200, 60))
+                    .strong(),
+            );
+            ui.label(
+                RichText::new("Run custom scripts when clips are copied, pasted, or synced. Automate workflows with shell commands, HTTP requests, or file operations triggered by clipboard events.")
+                    .color(Color32::GRAY)
+                    .small(),
+            );
+
+            ui.add_space(16.0);
+
+            // ── Paste Transforms (placeholder) ───────────────────────────────
+            ui.label(RichText::new("Paste Transforms").strong().size(14.0));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Coming Soon")
+                    .color(Color32::from_rgb(255, 200, 60))
+                    .strong(),
+            );
+            ui.label(
+                RichText::new("Transform clipboard content before pasting: trim whitespace, convert case, strip formatting, prettify JSON/XML, URL encode/decode, and more.")
+                    .color(Color32::GRAY)
+                    .small(),
+            );
+
+            ui.add_space(16.0);
+
             // ── Cloud Sync ───────────────────────────────────────────────────
             ui.label(RichText::new("Cloud Sync").strong().size(14.0));
             ui.separator();
@@ -1966,6 +2317,137 @@ impl ClipXApp {
                     });
                     ui.end_row();
                 });
+
+            ui.add_space(16.0);
+
+            // ── Backup & Restore ─────────────────────────────────────────────
+            ui.label(RichText::new("Backup & Restore").strong().size(14.0));
+            ui.separator();
+            ui.add_space(4.0);
+
+            ui.label(
+                RichText::new("Export or import your clipboard history as an encrypted file.")
+                    .color(Color32::GRAY)
+                    .small(),
+            );
+            ui.add_space(4.0);
+
+            egui::Grid::new("settings_backup")
+                .num_columns(2)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Backup password");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.backup_password)
+                            .password(true)
+                            .desired_width(200.0)
+                            .hint_text("Enter password…"),
+                    );
+                    ui.end_row();
+                });
+
+            ui.add_space(8.0);
+
+            let pw_empty = self.backup_password.is_empty();
+            let busy = self.backup_loading;
+
+            ui.horizontal(|ui| {
+                let export_btn = ui.add_enabled(
+                    !pw_empty && !busy,
+                    egui::Button::new("Export Backup"),
+                );
+                if export_btn.clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("ClipX Backup", &["clipx"])
+                        .set_file_name(format!("clipx-backup-{}.clipx", Local::now().format("%Y%m%d-%H%M%S")))
+                        .save_file()
+                    {
+                        self.backup_loading = true;
+                        self.backup_status = Some(("Exporting…".into(), false));
+                        let storage = self.storage.clone();
+                        let settings = self.settings.clone();
+                        let password = self.backup_password.clone();
+                        let tx = self.backup_tx.clone();
+                        self.handle.spawn(async move {
+                            let s = settings.read().await;
+                            let device_name = s.device_name.clone();
+                            drop(s);
+                            match crate::backup::export_backup(
+                                &storage,
+                                &device_name,
+                                &password,
+                                &path,
+                            )
+                            .await
+                            {
+                                Ok(r) => {
+                                    let _ = tx.try_send(Ok(BackupMsg::ExportDone {
+                                        clip_count: r.clip_count,
+                                        file_size: r.file_size,
+                                    }));
+                                }
+                                Err(e) => {
+                                    let _ = tx.try_send(Err(e.to_string()));
+                                }
+                            }
+                        });
+                    }
+                }
+
+                let import_btn = ui.add_enabled(
+                    !pw_empty && !busy,
+                    egui::Button::new("Import Backup"),
+                );
+                if import_btn.clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("ClipX Backup", &["clipx"])
+                        .pick_file()
+                    {
+                        self.backup_loading = true;
+                        self.backup_status = Some(("Importing…".into(), false));
+                        let storage = self.storage.clone();
+                        let settings = self.settings.clone();
+                        let password = self.backup_password.clone();
+                        let tx = self.backup_tx.clone();
+                        self.handle.spawn(async move {
+                            let s = settings.read().await;
+                            let user_id = s.user_id;
+                            let device_id = s.device_id;
+                            drop(s);
+                            match crate::backup::import_backup(
+                                &storage,
+                                user_id,
+                                device_id,
+                                &password,
+                                &path,
+                            )
+                            .await
+                            {
+                                Ok(r) => {
+                                    let _ = tx.try_send(Ok(BackupMsg::ImportDone {
+                                        imported: r.imported,
+                                        skipped: r.skipped,
+                                        total: r.total_in_backup,
+                                    }));
+                                }
+                                Err(e) => {
+                                    let _ = tx.try_send(Err(e.to_string()));
+                                }
+                            }
+                        });
+                    }
+                }
+
+                if busy {
+                    ui.spinner();
+                }
+            });
+
+            if let Some((msg, is_error)) = &self.backup_status {
+                ui.add_space(4.0);
+                let color = if *is_error { Color32::from_rgb(255, 100, 100) } else { Color32::from_rgb(100, 255, 100) };
+                ui.label(RichText::new(msg).color(color).small());
+            }
 
             ui.add_space(16.0);
 

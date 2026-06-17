@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use uuid::Uuid;
 
-use crate::models::{Clip, Device, PeerDevice, QueueEntry, Settings};
+use crate::models::{Clip, PeerDevice, QueueEntry};
 
 pub struct Storage {
     pool: SqlitePool,
@@ -86,12 +86,15 @@ impl Storage {
         let _ = sqlx::query("ALTER TABLE clips ADD COLUMN pin_slot INTEGER DEFAULT NULL")
             .execute(&self.pool)
             .await;
+        let _ = sqlx::query("ALTER TABLE clips ADD COLUMN category TEXT DEFAULT NULL")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
-    pub async fn insert_clip(&self, clip: &Clip) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO clips (id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    pub async fn insert_clip(&self, clip: &Clip) -> anyhow::Result<u64> {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO clips (id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(clip.id.to_string())
         .bind(clip.user_id.to_string())
@@ -102,9 +105,10 @@ impl Storage {
         .bind(clip.created_at.to_rfc3339())
         .bind(clip.is_pinned() as i32)
         .bind(clip.pin_slot.map(|v| v as i32))
+        .bind(clip.category.as_deref())
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected())
     }
 
     pub async fn get_recent_clips(&self, _user_id: Uuid, limit: i64) -> anyhow::Result<Vec<Clip>> {
@@ -112,7 +116,7 @@ impl Storage {
         // Filtering by current settings.user_id breaks history across re-bootstraps,
         // when the server hands out a fresh user UUID.
         let rows = sqlx::query_as::<_, ClipRow>(
-            "SELECT id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot FROM clips ORDER BY CASE WHEN pin_slot IS NOT NULL THEN 0 ELSE 1 END, pin_slot ASC, created_at DESC LIMIT ?"
+            "SELECT id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot, category FROM clips ORDER BY CASE WHEN pin_slot IS NOT NULL THEN 0 ELSE 1 END, pin_slot ASC, created_at DESC LIMIT ?"
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -121,10 +125,20 @@ impl Storage {
         rows.into_iter().map(|r| r.try_into()).collect()
     }
 
+    pub async fn get_all_clips(&self) -> anyhow::Result<Vec<Clip>> {
+        let rows = sqlx::query_as::<_, ClipRow>(
+            "SELECT id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot, category FROM clips ORDER BY created_at DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    #[allow(dead_code)]
     pub async fn search_clips(&self, _user_id: Uuid, query: &str, limit: i64) -> anyhow::Result<Vec<Clip>> {
         let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
         let rows = sqlx::query_as::<_, ClipRow>(
-            "SELECT id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot FROM clips WHERE content LIKE ? ESCAPE '\\' ORDER BY CASE WHEN pin_slot IS NOT NULL THEN 0 ELSE 1 END, pin_slot ASC, created_at DESC LIMIT ?"
+            "SELECT id, user_id, device_id, content, format, e2e, created_at, pinned, pin_slot, category FROM clips WHERE content LIKE ? ESCAPE '\\' ORDER BY CASE WHEN pin_slot IS NOT NULL THEN 0 ELSE 1 END, pin_slot ASC, created_at DESC LIMIT ?"
         )
         .bind(like)
         .bind(limit)
@@ -146,6 +160,15 @@ impl Storage {
     pub async fn clear_pin_slot(&self, slot: u8) -> anyhow::Result<()> {
         sqlx::query("UPDATE clips SET pin_slot = NULL, pinned = 0 WHERE pin_slot = ?")
             .bind(slot as i32)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_category(&self, clip_id: Uuid, category: Option<&str>) -> anyhow::Result<()> {
+        sqlx::query("UPDATE clips SET category = ? WHERE id = ?")
+            .bind(category)
+            .bind(clip_id.to_string())
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -229,6 +252,7 @@ impl Storage {
         Ok(row)
     }
 
+    #[allow(dead_code)]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -266,6 +290,7 @@ impl Storage {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn update_peer_device_ip(&self, id: Uuid, ip: &str, port: u16) -> anyhow::Result<()> {
         sqlx::query("UPDATE peer_devices SET ip = ?, port = ? WHERE id = ?")
             .bind(ip)
@@ -286,8 +311,10 @@ struct ClipRow {
     format: String,
     e2e: i32,
     created_at: String,
+    #[allow(dead_code)]
     pinned: i32,
     pin_slot: Option<i32>,
+    category: Option<String>,
 }
 
 impl TryFrom<ClipRow> for Clip {
@@ -302,6 +329,7 @@ impl TryFrom<ClipRow> for Clip {
             e2e: r.e2e != 0,
             created_at: r.created_at.parse()?,
             pin_slot: r.pin_slot.and_then(|v| if (1..=9).contains(&v) { Some(v as u8) } else { None }),
+            category: r.category,
         })
     }
 }
@@ -376,6 +404,7 @@ mod tests {
             e2e: false,
             created_at: Utc::now(),
             pin_slot: None,
+            category: None,
         };
 
         storage.insert_clip(&clip).await.unwrap();

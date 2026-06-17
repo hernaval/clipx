@@ -7,6 +7,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ClipX.Core</AssemblyName>
     <RootNamespace>ClipX.Core</RootNamespace>
+    <OutDir>..\dist</OutDir>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
 
   <ItemGroup>
